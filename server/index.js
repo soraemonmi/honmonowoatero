@@ -34,11 +34,12 @@ function allocateAnon(room){
   return available[Math.floor(Math.random()*available.length)] || '?';
 }
 function getRoom(code){ return rooms.get(code); }
-function emitRoom(room){ io.to(room.code).emit('room:update', { code:room.code, phase:room.phase, settings:room.settings, players:room.players.map(viewerPlayer), round:room.round, scores:makeScoreboard(room), myRoom:true });
+function emitRoom(room){ io.to(room.code).emit('room:update', { code:room.code, phase:room.phase, settings:{...room.settings, answerCount:answerCount(room)}, players:room.players.map(viewerPlayer), round:room.round, scores:makeScoreboard(room), myRoom:true });
   room.players.forEach(p => io.to(p.id).emit('host:status', { isHost: p.id === room.hostId }));
 }
+function answerCount(room){ return Math.max(0, room.players.filter(p=>p.connected).length - room.settings.fakeCount); }
 function makeScoreboard(room){
-  return room.players.map(p=>({ id:p.id, anon:p.anon, score:p.score, correct:p.correct, attempts:p.attempts, rate:p.attempts?Math.round(p.correct/p.attempts*100):0 }));
+  return room.players.map(p=>({ id:p.id, anon:p.anon, name:p.name, score:p.score, earnedPoints:p.earnedPoints||0, correct:p.correct, attempts:p.attempts, rate:p.attempts?Math.round(p.correct/p.attempts*100):0 }));
 }
 function chooseWeighted(list, counts, need){
   const pool = [...list]; const out=[];
@@ -55,22 +56,18 @@ function assignRoles(room){
   shuffle(ps);
   const realCounts = Object.fromEntries(ps.map(p=>[p.id,p.roleCounts.real||0]));
   const fakeCounts = Object.fromEntries(ps.map(p=>[p.id,p.roleCounts.fake||0]));
-  const guessCounts = Object.fromEntries(ps.map(p=>[p.id,p.roleCounts.guesser||0]));
-  const realPool = ps;
-  const real = chooseWeighted(realPool, realCounts,1)[0];
-  const remaining1 = ps.filter(p=>p.id!==real.id);
-  const fakeNeed = Math.min(room.settings.fakeCount, remaining1.length);
-  const fakes = chooseWeighted(remaining1, fakeCounts, fakeNeed);
-  const remaining2 = remaining1.filter(p=>!fakes.some(x=>x.id===p.id));
-  const guessNeed = Math.min(room.settings.guesserCount, remaining2.length);
-  const guessers = chooseWeighted(remaining2, guessCounts, guessNeed);
-  ps.forEach(p=>{ p.role='spectator'; });
-  real.role='real'; fakes.forEach(p=>p.role='fake'); guessers.forEach(p=>p.role='guesser');
+  // Every non-fake player is an answerer. The real player is included in that count.
+  const real = chooseWeighted(ps, realCounts, 1)[0];
+  const remaining = ps.filter(p=>p.id!==real.id);
+  const fakeNeed = Math.min(room.settings.fakeCount, remaining.length);
+  const fakes = chooseWeighted(remaining, fakeCounts, fakeNeed);
+  ps.forEach(p=>{ p.role = fakes.some(x=>x.id===p.id) ? 'fake' : 'guesser'; p.targetId = null; });
+  real.role='real';
   real.roleCounts.real++;
   fakes.forEach(p=>p.roleCounts.fake++);
+  // Answerers are everyone who is not a fake, including the real player.
+  const guessers = ps.filter(p=>!fakes.some(x=>x.id===p.id));
   guessers.forEach(p=>p.roleCounts.guesser++);
-  const targets = shuffle(ps.filter(p=>p.id!==real.id));
-  // Each fake privately knows the real person's name and is asked to imitate that person's "likely" response.
   fakes.forEach(p=>{ p.targetId=real.id; });
   return {real,fakes,guessers};
 }
@@ -95,7 +92,7 @@ function beginRound(room){
   return true;
 }
 function broadcastRound(room){
-  const base={ phase:room.phase, number:room.round.number, topic:room.round.topic, settings:room.settings, scoreboard:makeScoreboard(room) };
+  const base={ phase:room.phase, number:room.round.number, topic:room.round.topic, settings:{...room.settings, answerCount:answerCount(room)}, scoreboard:makeScoreboard(room) };
   room.players.forEach(p=>{
     const payload={...base, role:p.role, self:{id:p.id,name:p.name,anon:p.anon}, roleNames:roleNamesFor(p,room), deadline:room.round.writingDeadline,
       posts:Object.values(room.round.posts).map(post=>({id:post.id, anon:post.anon, text:post.text})),
@@ -118,8 +115,7 @@ function guessTargetNameFor(p,room){
   if(p.role==='guesser' || p.role==='spectator') return real?.name || '';
   return '';
 }
-function addSuccess(p){ p.correct++; p.attempts++; }
-function addFailure(p){ p.attempts++; }
+function addPoints(p, points){ p.earnedPoints=(p.earnedPoints||0)+points; p.score=p.earnedPoints; }
 function endRound(room){
   if(room.phase!=='voting') return;
   room.round.revealed=true;
@@ -132,28 +128,24 @@ function endRound(room){
     const target=room.players.find(p=>p.id===targetId); if(!target) continue;
     const success=targetId===realId;
     room.round.voteResults.push({voterId, voterName:voter.name, voterAnon:voter.anon, targetId, targetAnon:target.anon, targetName:target.name, success});
-    if(voter.role==='guesser'){ success?addSuccess(voter):addFailure(voter); }
+    if(voter.role==='guesser' && success) addPoints(voter,1);
   }
-  // The real player's own success depends on whether at least one guesser selected them.
+  // The real player earns 1 point when at least one answerer identifies them.
   const realChosen = room.round.voteResults.some(v=>v.targetId===realId);
   const real=room.players.find(p=>p.id===realId);
-  if(real) realChosen?addSuccess(real):addFailure(real);
-  // Every fake that was selected gets success; unselected fakes fail for this round.
+  if(real && realChosen) addPoints(real,1);
+  // A fake earns 2 points when at least one answerer mistakes that fake for the real player.
   room.round.fakeIds.forEach(fid=>{
     const fake=room.players.find(p=>p.id===fid); if(!fake) return;
     const chosen=room.round.voteResults.some(v=>v.targetId===fid);
-    chosen?addSuccess(fake):addFailure(fake);
-  });
-  room.players.forEach(p=>{
-    const base = p.correct/p.attempts*1000;
-    p.score=Math.round(base*100)/100;
+    if(chosen) addPoints(fake,2);
   });
   room.phase='reveal';
   broadcastReveal(room);
   emitRoom(room);
 }
 function broadcastReveal(room){
-  const base={ phase:'reveal', number:room.round.number, topic:room.round.topic, settings:room.settings, scoreboard:makeScoreboard(room), realId:room.round.realId, fakeIds:room.round.fakeIds,
+  const base={ phase:'reveal', number:room.round.number, topic:room.round.topic, settings:{...room.settings, answerCount:answerCount(room)}, scoreboard:makeScoreboard(room), realId:room.round.realId, fakeIds:room.round.fakeIds,
     posts:Object.values(room.round.posts).map(post=>({id:post.id,anon:post.anon,text:post.text,name:post.name})),
     voteResults:room.round.voteResults,
     candidatePlayers:room.players.filter(x=>x.connected).map(viewerPlayer), };
@@ -179,13 +171,13 @@ function goVoting(room){
 }
 
 io.on('connection', socket=>{
-  socket.on('room:create', ({name, fakeCount, guesserCount, writeSeconds})=>{
+  socket.on('room:create', ({name, fakeCount, writeSeconds})=>{
     if(!name?.trim()) return socket.emit('error:msg','名前を入力してください');
     let c=code(); while(rooms.has(c)) c=code();
-    const p={id:socket.id,name:name.trim().slice(0,20),anon:allocateAnon({players:[]}),connected:true,isHost:true,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:''};
-    const room={code:c,hostId:socket.id,phase:'lobby',settings:{fakeCount:clamp(fakeCount,1,18),guesserCount:clamp(guesserCount,1,18),writeSeconds:clamp(writeSeconds,15,120)},players:[p],round:{number:0},createdAt:Date.now()};
+    const p={id:socket.id,name:name.trim().slice(0,20),anon:allocateAnon({players:[]}),connected:true,isHost:true,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:'',earnedPoints:0};
+    const room={code:c,hostId:socket.id,phase:'lobby',settings:{fakeCount:clamp(fakeCount,1,Math.max(1,1)),writeSeconds:clamp(writeSeconds,15,120)},players:[p],round:{number:0},createdAt:Date.now()};
     rooms.set(c,room); socket.join(c);
-    socket.emit('room:joined',{code:c,me:publicPlayer(p),players:room.players.map(viewerPlayer),settings:room.settings,isHost:true}); emitRoom(room);
+    socket.emit('room:joined',{code:c,me:publicPlayer(p),players:room.players.map(viewerPlayer),settings:{...room.settings, answerCount:answerCount(room)},isHost:true}); emitRoom(room);
   });
   socket.on('room:join', ({code,name})=>{
     const room=getRoom(String(code||'').trim().toUpperCase());
@@ -193,24 +185,24 @@ io.on('connection', socket=>{
     if(room.phase!=='lobby') return socket.emit('error:msg','この部屋はすでにゲーム中です');
     if(room.players.length>=MAX_PLAYERS) return socket.emit('error:msg','最大20人です');
     if(!name?.trim()) return socket.emit('error:msg','名前を入力してください');
-    const p={id:socket.id,name:name.trim().slice(0,20),anon:allocateAnon(room),connected:true,isHost:false,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:''};
+    const p={id:socket.id,name:name.trim().slice(0,20),anon:allocateAnon(room),connected:true,isHost:false,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:'',earnedPoints:0};
     room.players.push(p); socket.join(room.code);
-    socket.emit('room:joined',{code:room.code,me:publicPlayer(p),players:room.players.map(viewerPlayer),settings:room.settings,isHost:false}); emitRoom(room);
+    socket.emit('room:joined',{code:room.code,me:publicPlayer(p),players:room.players.map(viewerPlayer),settings:{...room.settings, answerCount:answerCount(room)},isHost:false}); emitRoom(room);
   });
-  socket.on('room:settings', ({fakeCount,guesserCount,writeSeconds})=>{
+  socket.on('room:settings', ({fakeCount,writeSeconds})=>{
     const room=[...rooms.values()].find(r=>r.hostId===socket.id); if(!room) return;
     if(room.phase!=='lobby') return socket.emit('error:msg','開始後は設定を変更できません');
     const connected=room.players.filter(p=>p.connected).length;
-    const f=clamp(fakeCount,1,Math.max(1,connected-2));
-    const g=clamp(guesserCount,1,Math.max(1,connected-1-f));
-    room.settings={fakeCount:f,guesserCount:g,writeSeconds:clamp(writeSeconds,15,120)}; emitRoom(room);
+    const f=clamp(fakeCount,1,Math.max(1,connected-1));
+    room.settings={fakeCount:f,writeSeconds:clamp(writeSeconds,15,120)};
+    emitRoom(room);
   });
   socket.on('game:start',()=>{
     const room=[...rooms.values()].find(r=>r.hostId===socket.id); if(!room) return;
     const n=room.players.filter(p=>p.connected).length;
     if(n<3){ return socket.emit('error:msg','3人以上必要です'); }
-    if(room.settings.fakeCount+room.settings.guesserCount+1>n){ return socket.emit('error:msg','本物・偽物・当てる人の合計が参加人数を超えています'); }
-    room.players.forEach(p=>{p.correct=0;p.attempts=0;p.score=0;p.roleCounts={real:0,fake:0,guesser:0};});
+    if(room.settings.fakeCount>=n){ return socket.emit('error:msg','参加人数より少ない偽物人数にしてください'); }
+    room.players.forEach(p=>{p.correct=0;p.attempts=0;p.score=0;p.earnedPoints=0;p.roleCounts={real:0,fake:0,guesser:0};});
     beginRound(room);
   });
   socket.on('post:submit',({text})=>{
@@ -248,7 +240,7 @@ io.on('connection', socket=>{
   socket.on('game:end',()=>{
     const room=[...rooms.values()].find(r=>r.hostId===socket.id); if(!room) return;
     room.phase='ended';
-    room.players.forEach(p=>{p.score=Math.round((p.attempts?p.correct/p.attempts:0)*100000)/100;});
+    room.players.forEach(p=>{p.score=p.earnedPoints||0;});
     emitRoom(room);
     io.to(room.code).emit('game:ended',{scoreboard:makeScoreboard(room)});
   });
