@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: true-or-fake-chat-game
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start

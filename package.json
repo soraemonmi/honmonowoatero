@@ -1,0 +1,8 @@
+{
+  "name": "true-or-fake-chat-game",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {"start":"node server/index.js"},
+  "dependencies": {"express":"^4.21.2","socket.io":"^4.8.1"}
+}
