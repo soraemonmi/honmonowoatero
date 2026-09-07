@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>本物はどっち？</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="app">
+<header><div><h1>本物はどっち？</h1><p class="sub">匿名チャット推理ゲーム</p></div><div id="roomBadge" class="badge hidden"></div></header>
+<main>
+<section id="home" class="card">
+  <h2>ゲームに参加</h2>
+  <label>あなたの名前<input id="nameInput" maxlength="20" placeholder="名前を入力" /></label>
+  <div class="joinRow"><button id="createBtn">部屋を作る</button><input id="codeInput" maxlength="6" placeholder="ルームコード" /><button id="joinBtn" class="secondary">参加</button></div>
+</section>
+<section id="lobby" class="card hidden">
+  <div class="row between"><div><h2>ロビー</h2><p id="roomCodeText"></p></div><button id="copyBtn" class="secondary">コードをコピー</button></div>
+  <div id="hostSettings" class="settings"></div>
+  <h3>参加者 <span id="playerCount"></span></h3>
+  <div id="playersList" class="players"></div>
+  <button id="startBtn" class="primary wide">ゲーム開始</button>
+</section>
+<section id="game" class="hidden">
+  <div class="topbar"><div id="roundText"></div><div id="phaseText"></div><div id="timer"></div></div>
+  <div class="card roleCard"><div id="roleTitle"></div><div id="roleInfo"></div></div>
+  <div id="topicCard" class="topic card"></div>
+  <div id="postsPanel" class="card"><h2>投稿</h2><div id="posts" class="posts"></div><div id="postForm"></div></div>
+  <div id="votePanel" class="card hidden"><h2>投票</h2><p id="voteGuide"></p><div id="voteChoices" class="voteChoices"></div><div id="liveVotes"></div></div>
+  <div id="revealPanel" class="card hidden"></div>
+  <div id="spectatorPanel" class="card"><h2>観戦</h2><div id="spectatorText"></div></div>
+  <div class="card scoreboard"><h2>ポイント</h2><div id="scoreboard"></div></div>
+</section>
+<section id="toast" class="toast hidden"></section>
+</main>
+</div>
+<script src="/socket.io/socket.io.js"></script><script src="/app.js"></script>
+</body></html>
