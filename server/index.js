@@ -24,10 +24,19 @@ function uid(){ return Math.random().toString(36).slice(2,10); }
 function clamp(n,min,max){ return Math.max(min, Math.min(max, Number(n)||0)); }
 function shuffle(arr){ for(let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; }
 function code(){ return Math.random().toString(36).slice(2,8).toUpperCase(); }
-function publicPlayer(p){ return { id:p.id, anon:p.anon, name:p.name, connected:p.connected, isHost:p.isHost }; }
-function viewerPlayer(p){ return { id:p.id, anon:p.anon, connected:p.connected, isHost:p.isHost }; }
+function publicPlayer(p){ return { id:p.id, anon:p.anon, name:p.name, connected:p.connected }; }
+// Deliberately excludes real names and host status. These are secret during the game.
+function viewerPlayer(p){ return { id:p.id, anon:p.anon, connected:p.connected }; }
+const ANONS = 'ABCDEFGHIJKLMNOPQRST'.split('');
+function allocateAnon(room){
+  const used = new Set(room.players.map(p => p.anon));
+  const available = ANONS.filter(x => !used.has(x));
+  return available[Math.floor(Math.random()*available.length)] || '?';
+}
 function getRoom(code){ return rooms.get(code); }
-function emitRoom(room){ io.to(room.code).emit('room:update', { code:room.code, hostId:room.hostId, phase:room.phase, settings:room.settings, players:room.players.map(viewerPlayer), round:room.round, scores:makeScoreboard(room), myRoom:true }); }
+function emitRoom(room){ io.to(room.code).emit('room:update', { code:room.code, phase:room.phase, settings:room.settings, players:room.players.map(viewerPlayer), round:room.round, scores:makeScoreboard(room), myRoom:true });
+  room.players.forEach(p => io.to(p.id).emit('host:status', { isHost: p.id === room.hostId }));
+}
 function makeScoreboard(room){
   return room.players.map(p=>({ id:p.id, anon:p.anon, score:p.score, correct:p.correct, attempts:p.attempts, rate:p.attempts?Math.round(p.correct/p.attempts*100):0 }));
 }
@@ -89,8 +98,11 @@ function broadcastRound(room){
   const base={ phase:room.phase, number:room.round.number, topic:room.round.topic, settings:room.settings, scoreboard:makeScoreboard(room) };
   room.players.forEach(p=>{
     const payload={...base, role:p.role, self:{id:p.id,name:p.name,anon:p.anon}, roleNames:roleNamesFor(p,room), deadline:room.round.writingDeadline,
-      posts:Object.values(room.round.posts).map(post=>({anon:post.anon, text:post.text})),
-      candidatePlayers:room.players.filter(x=>x.connected).map(viewerPlayer)
+      posts:Object.values(room.round.posts).map(post=>({id:post.id, anon:post.anon, text:post.text})),
+      candidatePlayers:room.players.filter(x=>x.connected).map(viewerPlayer),
+      guessTargetName:guessTargetNameFor(p,room),
+      guesserCount:room.round.guesserIds.length,
+      voteCount:Object.keys(room.round.votes).length
     };
     io.to(p.id).emit('round:update',payload);
   });
@@ -100,6 +112,11 @@ function roleNamesFor(p,room){
   const fakes=room.players.filter(x=>room.round.fakeIds.includes(x.id));
   if(p.role==='real' || p.role==='fake') return { realName:real?.name, fakeNames:fakes.map(x=>x.name) };
   return {};
+}
+function guessTargetNameFor(p,room){
+  const real=room.players.find(x=>x.id===room.round.realId);
+  if(p.role==='guesser' || p.role==='spectator') return real?.name || '';
+  return '';
 }
 function addSuccess(p){ p.correct++; p.attempts++; }
 function addFailure(p){ p.attempts++; }
@@ -138,14 +155,24 @@ function endRound(room){
 function broadcastReveal(room){
   const base={ phase:'reveal', number:room.round.number, topic:room.round.topic, settings:room.settings, scoreboard:makeScoreboard(room), realId:room.round.realId, fakeIds:room.round.fakeIds,
     posts:Object.values(room.round.posts).map(post=>({id:post.id,anon:post.anon,text:post.text,name:post.name})),
-    voteResults:room.round.voteResults, };
+    voteResults:room.round.voteResults,
+    candidatePlayers:room.players.filter(x=>x.connected).map(viewerPlayer), };
   room.players.forEach(p=>{
     io.to(p.id).emit('round:reveal', {...base, realName:room.players.find(x=>x.id===room.round.realId)?.name,
-      fakeNames:room.players.filter(x=>room.round.fakeIds.includes(x.id)).map(x=>x.name)});
+      fakeNames:room.players.filter(x=>room.round.fakeIds.includes(x.id)).map(x=>x.name),
+      guesserNames:room.players.filter(x=>room.round.guesserIds.includes(x.id)).map(x=>x.name)});
   });
 }
 function goVoting(room){
   if(room.phase!=='writing') return;
+  const requiredIds=[room.round.realId,...room.round.fakeIds];
+  for(const id of requiredIds){
+    if(room.round.posts[id]) continue;
+    const p=room.players.find(x=>x.id===id);
+    if(!p) continue;
+    room.round.posts[id]={id:p.id,name:p.name,anon:p.anon,text:'（未投稿）'};
+  }
+  room.round.postCount=requiredIds.filter(id=>room.round.posts[id]).length;
   room.phase='voting';
   room.round.writingDeadline=0;
   broadcastRound(room);
@@ -155,7 +182,7 @@ io.on('connection', socket=>{
   socket.on('room:create', ({name, fakeCount, guesserCount, writeSeconds})=>{
     if(!name?.trim()) return socket.emit('error:msg','名前を入力してください');
     let c=code(); while(rooms.has(c)) c=code();
-    const p={id:socket.id,name:name.trim().slice(0,20),anon:'A',connected:true,isHost:true,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:''};
+    const p={id:socket.id,name:name.trim().slice(0,20),anon:allocateAnon({players:[]}),connected:true,isHost:true,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:''};
     const room={code:c,hostId:socket.id,phase:'lobby',settings:{fakeCount:clamp(fakeCount,1,18),guesserCount:clamp(guesserCount,1,18),writeSeconds:clamp(writeSeconds,15,120)},players:[p],round:{number:0},createdAt:Date.now()};
     rooms.set(c,room); socket.join(c);
     socket.emit('room:joined',{code:c,me:publicPlayer(p),players:room.players.map(viewerPlayer),settings:room.settings,isHost:true}); emitRoom(room);
@@ -166,7 +193,7 @@ io.on('connection', socket=>{
     if(room.phase!=='lobby') return socket.emit('error:msg','この部屋はすでにゲーム中です');
     if(room.players.length>=MAX_PLAYERS) return socket.emit('error:msg','最大20人です');
     if(!name?.trim()) return socket.emit('error:msg','名前を入力してください');
-    const p={id:socket.id,name:name.trim().slice(0,20),anon:String.fromCharCode(65+room.players.length),connected:true,isHost:false,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:''};
+    const p={id:socket.id,name:name.trim().slice(0,20),anon:allocateAnon(room),connected:true,isHost:false,role:'spectator',roleCounts:{real:0,fake:0,guesser:0},correct:0,attempts:0,score:0,currentPost:''};
     room.players.push(p); socket.join(room.code);
     socket.emit('room:joined',{code:room.code,me:publicPlayer(p),players:room.players.map(viewerPlayer),settings:room.settings,isHost:false}); emitRoom(room);
   });
@@ -189,16 +216,18 @@ io.on('connection', socket=>{
   socket.on('post:submit',({text})=>{
     const room=[...rooms.values()].find(r=>r.players.some(p=>p.id===socket.id)); if(!room||room.phase!=='writing') return;
     if(Date.now()>room.round.writingDeadline) return socket.emit('error:msg','投稿時間が終了しました');
-    if(room.round.posts[socket.id]) return socket.emit('error:msg','すでに投稿済みです');
     const p=room.players.find(x=>x.id===socket.id); if(!p) return;
+    if(!['real','fake'].includes(p.role)) return socket.emit('error:msg','このラウンドで投稿できるのは本物と偽物だけです');
+    if(room.round.posts[socket.id]) return socket.emit('error:msg','すでに投稿済みです');
     const cleaned=String(text||'').trim().slice(0,200);
     if(!cleaned) return socket.emit('error:msg','文章を入力してください');
     room.round.posts[socket.id]={id:p.id,name:p.name,anon:p.anon,text:cleaned};
     room.round.postCount=Object.keys(room.round.posts).length;
-    io.to(room.code).emit('round:postCount',{count:room.round.postCount,total:room.round.playersAtStart.length});
-    // During writing, everyone can see the submitted text large; no author mapping is sent.
-    io.to(room.code).emit('round:postAdded',{anon:p.anon,text:cleaned});
-    if(room.round.postCount>=room.round.playersAtStart.length) goVoting(room);
+    const requiredPostIds=[room.round.realId,...room.round.fakeIds];
+    io.to(room.code).emit('round:postCount',{count:room.round.postCount,total:requiredPostIds.length});
+    // Post author is anonymous during the round; only the text + anonymous label are revealed.
+    io.to(room.code).emit('round:postAdded',{id:p.id,anon:p.anon,text:cleaned});
+    if(requiredPostIds.every(id=>room.round.posts[id])) goVoting(room);
   });
   socket.on('vote:submit',({targetId})=>{
     const room=[...rooms.values()].find(r=>r.players.some(p=>p.id===socket.id)); if(!room||room.phase!=='voting') return;
@@ -207,7 +236,8 @@ io.on('connection', socket=>{
     if(!room.round.posts[targetId]) return socket.emit('error:msg','そのプレイヤーは回答候補ではありません');
     room.round.votes[socket.id]=targetId;
     const voter=room.players.find(p=>p.id===socket.id), target=room.players.find(p=>p.id===targetId);
-    io.to(room.code).emit('vote:added',{voterId:socket.id,voterName:voter.name,voterAnon:voter.anon,targetId,targetAnon:target.anon});
+    // Keep voter identity and target hidden until the reveal.
+    io.to(room.code).emit('vote:count',{count:Object.keys(room.round.votes).length,total:room.round.guesserIds.length});
     const allVoted=room.round.guesserIds.every(id=>room.round.votes[id]); if(allVoted) endRound(room);
   });
   socket.on('game:next',()=>{
@@ -227,7 +257,7 @@ io.on('connection', socket=>{
       const p=room.players.find(x=>x.id===socket.id); if(!p) continue;
       p.connected=false;
       if(room.phase==='lobby'){
-        if(room.hostId===socket.id){ const next=room.players.find(x=>x.connected); room.hostId=next?.id||null; if(next) next.isHost=true; }
+        if(room.hostId===socket.id){ const next=room.players.find(x=>x.connected); room.hostId=next?.id||null; room.players.forEach(x=>x.isHost=x.id===room.hostId); }
         emitRoom(room);
       } else {
         io.to(room.code).emit('player:disconnected',{id:socket.id,anon:p.anon});
