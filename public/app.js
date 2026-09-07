@@ -11,6 +11,7 @@ let state = {
   scoreboard: [],
   votes: [],
   myVoted: false,
+  playerCount: 0,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -38,27 +39,28 @@ function renderPlayers(players) {
       <div class="small">${!p.connected ? '（切断）' : ''}</div>
     </div>`
   ).join('');
-  $('#playerCount').textContent = `${players.filter((p) => p.connected).length}/20`;
+  state.playerCount = players.filter((p) => p.connected).length;
+  $('#playerCount').textContent = `${state.playerCount}/20`;
 }
 function renderScores() {
-  const s = [...(state.scoreboard || [])].sort((a, b) => b.score - a.score);
-  $('#scoreboard').innerHTML = s.map((p, i) =>
-    `<div class="scoreRow"><b>${i + 1}</b><div>プレイヤー${p.anon}</div><div>${p.score.toFixed(2)}pt</div><div>${p.rate}%</div></div>`
+  const s = [...(state.scoreboard || [])].sort((a, b) => (b.earnedPoints - a.earnedPoints) || (b.rate - a.rate) || (b.score - a.score));
+  $('#scoreboard').innerHTML = `<div class="scoreHead"><span></span><span>プレイヤー</span><span>ポイント</span><span>成功率</span></div>` + s.map((p, i) =>
+    `<div class="scoreRow"><b>${i + 1}</b><div>${escapeHtml(p.name || '')}</div><div>${Math.round(p.earnedPoints ?? p.score ?? 0)}pt</div><div>${p.rate}%</div></div>`
   ).join('');
 }
 function renderLobbySettings() {
   const s = state.settings;
+  const answerCount = s.answerCount ?? Math.max(0, (state.playerCount || 0) - Number(s.fakeCount || 0));
   $('#hostSettings').innerHTML = state.isHost
     ? `<div><label>偽物人数<input id="fakeCount" type="number" min="1" value="${s.fakeCount}"></label></div>
-       <div><label>当てる人数<input id="guesserCount" type="number" min="1" value="${s.guesserCount}"></label></div>
+       <div class="small">回答人数：${answerCount}人（ルーム内人数 − 偽物人数）</div>
        <div><label>入力時間(秒)<input id="writeSeconds" type="number" min="15" max="120" value="${s.writeSeconds}"></label></div>`
-    : `<div>ホストが設定します。偽物：${s.fakeCount}人 / 当てる人：${s.guesserCount}人 / 入力時間：${s.writeSeconds}秒</div>`;
+    : `<div>偽物：${s.fakeCount}人 / 回答人数：${answerCount}人 / 入力時間：${s.writeSeconds}秒</div>`;
   $('#startBtn').classList.toggle('hidden', !state.isHost);
   if (state.isHost) {
-    ['fakeCount', 'guesserCount', 'writeSeconds'].forEach((id) => {
+    ['fakeCount', 'writeSeconds'].forEach((id) => {
       $('#' + id).onchange = () => socket.emit('room:settings', {
         fakeCount: +$('#fakeCount').value,
-        guesserCount: +$('#guesserCount').value,
         writeSeconds: +$('#writeSeconds').value,
       });
     });
@@ -94,9 +96,9 @@ function renderVotePanel(d) {
   panel.classList.toggle('hidden', d.phase !== 'voting');
   if (d.phase !== 'voting') return;
 
-  if (d.role !== 'guesser') {
+  if (d.role === 'fake') {
     $('#voteGuide').textContent = `投票受付中：${d.voteCount}/${d.guesserCount}票。結果は投票終了後に公開されます。`;
-    $('#voteChoices').innerHTML = '<div class="small">当てる人が投票中です。あなたは観戦しています。</div>';
+    $('#voteChoices').innerHTML = '<div class="small">偽物は投票できません。</div>'; 
     return;
   }
 
@@ -188,7 +190,7 @@ function renderReveal(d) {
       </div>`).join('') || '<div class="small">投票なし</div>'}
     <div class="row between" style="margin-top:14px">
       ${state.isHost ? '<button id="nextBtn" class="primary">次のラウンド</button>' : ''}
-      <span class="small">本物と偽物の成功、当てる担当の正解をもとにポイントを更新します。</span>
+      <span class="small">本物を正解：+1pt / 本物が当てられる：+1pt / 偽物が本物だと判断される：+2pt</span>
     </div>`;
   $('#nextBtn')?.addEventListener('click', () => socket.emit('game:next'));
 }
