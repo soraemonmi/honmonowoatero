@@ -12,6 +12,7 @@ let state = {
   votes: [],
   myVoted: false,
   playerCount: 0,
+  customTopicCount: 0,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -57,6 +58,7 @@ function renderLobbySettings() {
        <div><label>入力時間(秒)<input id="writeSeconds" type="number" min="15" max="120" value="${s.writeSeconds}"></label></div>`
     : `<div>偽物：${s.fakeCount}人 / 回答人数：${answerCount}人 / 入力時間：${s.writeSeconds}秒</div>`;
   $('#startBtn').classList.toggle('hidden', !state.isHost);
+  $('#customTopicStatus').textContent = `${state.customTopicCount || 0}個のお題が追加されています。`;
   if (state.isHost) {
     ['fakeCount', 'writeSeconds'].forEach((id) => {
       $('#' + id).onchange = () => socket.emit('room:settings', {
@@ -67,6 +69,10 @@ function renderLobbySettings() {
   }
 }
 function renderPosts() {
+  if (state.phase === 'writing') {
+    $('#posts').innerHTML = '<div class="small">本物と偽物が投稿中です。全員の投稿がそろうまで内容は表示されません。</div>';
+    return;
+  }
   $('#posts').innerHTML = state.posts.map((p) =>
     `<div class="post">
       <div class="anon">プレイヤー${p.anon}</div>
@@ -98,7 +104,7 @@ function renderVotePanel(d) {
 
   if (d.role === 'fake') {
     $('#voteGuide').textContent = `投票受付中：${d.voteCount}/${d.guesserCount}票。結果は投票終了後に公開されます。`;
-    $('#voteChoices').innerHTML = '<div class="small">偽物は投票できません。</div>'; 
+    $('#voteChoices').innerHTML = '<div class="small">偽物は投票できません。</div>';
     return;
   }
 
@@ -216,6 +222,11 @@ $('#joinBtn').onclick = () => {
 $('#copyBtn').onclick = () => navigator.clipboard?.writeText(state.room).then(() => toast('ルームコードをコピーしました'));
 $('#startBtn').onclick = () => socket.emit('game:start');
 
+socket.on('topic:added', (msg) => {
+  $('#customTopicInput').value = '';
+  toast(msg);
+});
+
 socket.on('error:msg', (msg) => {
   state.myVoted = false;
   toast(msg);
@@ -225,6 +236,7 @@ socket.on('room:joined', (d) => {
   state.room = d.code;
   state.isHost = d.isHost;
   state.settings = d.settings;
+  state.customTopicCount = d.customTopicCount || 0;
   $('#roomBadge').textContent = d.code;
   $('#roomBadge').classList.remove('hidden');
   $('#roomCodeText').textContent = `ルームコード：${d.code}`;
@@ -235,6 +247,7 @@ socket.on('room:joined', (d) => {
 });
 socket.on('room:update', (d) => {
   state.settings = d.settings;
+  state.customTopicCount = d.customTopicCount || 0;
   renderPlayers(d.players);
   state.scoreboard = d.scores || [];
   renderScores();
@@ -250,11 +263,6 @@ socket.on('host:status', (d) => {
 });
 
 socket.on('round:update', (d) => renderGame(d));
-socket.on('round:postAdded', (d) => {
-  if (!state.posts.some((p) => p.id === d.id)) state.posts.push(d);
-  renderPosts();
-  if (state.phase === 'writing') renderPostForm(state.round);
-});
 socket.on('round:postCount', (d) => {
   $('#spectatorText').textContent = `投稿済み ${d.count}/${d.total}`;
 });
