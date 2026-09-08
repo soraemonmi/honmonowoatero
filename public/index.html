@@ -18,6 +18,12 @@
 <section id="lobby" class="card hidden">
   <div class="row between"><div><h2>ロビー</h2><p id="roomCodeText"></p></div><button id="copyBtn" class="secondary">コードをコピー</button></div>
   <div id="hostSettings" class="settings"></div>
+  <div class="topicCreator card" style="margin-top:12px">
+    <h3>お題を追加</h3>
+    <p class="small">誰でも追加できます。登録したお題は後のラウンドでランダムに使用されます。</p>
+    <div class="topicAddRow"><input id="customTopicInput" maxlength="60" placeholder="例：コンビニで欲しいものを見つけたとき" /><button id="addTopicBtn" class="secondary">お題を追加</button></div>
+    <div id="customTopicStatus" class="small"></div>
+  </div>
   <h3>参加者 <span id="playerCount"></span></h3>
   <div id="playersList" class="players"></div>
   <button id="startBtn" class="primary wide">ゲーム開始</button>
